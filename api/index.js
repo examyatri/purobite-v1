@@ -61,7 +61,6 @@ module.exports = async (req, res) => {
       case 'updateStaff':          result = await updateStaff(data); break;
       case 'deleteStaff':          result = await deleteStaff(data); break;
       case 'getStaff':             result = await getStaff(); break;
-      case 'staffLogin':           result = await staffLogin(data); break;
       case 'getKhata':             result = await getKhata(data); break;
       case 'getSubscriberBalance': result = await getSubscriberBalance(data); break;
       case 'rechargeWallet':       result = await rechargeWallet(data); break;
@@ -76,6 +75,7 @@ module.exports = async (req, res) => {
       case 'getAnalytics':         result = await getAnalytics(); break;
       case 'getUsers':             result = await getUsers(); break;
       case 'resetAdminPassword':   result = await resetAdminPassword(data); break;
+      case 'forceUdharOrder':      result = await forceUdharOrder(data); break;
       default: return res.json({ success: false, error: 'Unknown action: ' + action });
     }
     return res.json({ success: true, data: result });
@@ -85,9 +85,9 @@ module.exports = async (req, res) => {
   }
 };
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // HELPERS
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 function getIST() {
   return new Date(Date.now() + 5.5 * 3600000);
 }
@@ -106,9 +106,9 @@ function cleanPhone(p) {
   return String(p || '').replace(/\D/g, '');
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // AUTH
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function signupUser(data) {
   if (!data.phone || !data.password || !data.name) throw new Error('Name, phone, password required');
   const ph = cleanPhone(data.phone);
@@ -147,9 +147,10 @@ async function adminLogin(data) {
 async function resetAdminPassword(data) {
   if (!data.newPassword || String(data.newPassword).length < 6) throw new Error('Password must be 6+ characters');
   const hashed = await bcrypt.hash(String(data.newPassword), 10);
+  const email = data.email || 'visaryhal2022@vishal.com';
   const { error } = await supabase.from('admin_settings')
     .update({ password_hash: hashed })
-    .eq('admin_id', 'admin@purobite.com');
+    .eq('admin_id', email);
   if (error) throw new Error(error.message);
   return { success: true, message: 'Password updated' };
 }
@@ -168,8 +169,7 @@ async function updateProfile(data) {
 
 async function staffLogin(data) {
   if (!data.username || !data.password) throw new Error('Username and password required');
-  const { data: s } = await supabase.from('staff')
-    .select('*').eq('username', data.username).maybeSingle();
+  const { data: s } = await supabase.from('staff').select('*').eq('username', data.username).maybeSingle();
   if (!s) throw new Error('Invalid credentials');
   const match = await bcrypt.compare(String(data.password), s.password);
   if (!match) throw new Error('Invalid credentials');
@@ -177,9 +177,9 @@ async function staffLogin(data) {
   return { username: s.username, name: s.name, role: 'staff' };
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // MENU
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function getMenu(data) {
   const ist = getIST();
   const h = ist.getUTCHours() + ist.getUTCMinutes() / 60;
@@ -260,9 +260,9 @@ async function updateMenuOrder(data) {
   return true;
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // ORDERS
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function createOrder(data) {
   if (!data.userId) throw new Error('userId required');
   const items = Array.isArray(data.items) ? data.items : JSON.parse(data.items || '[]');
@@ -284,17 +284,12 @@ async function createOrder(data) {
     order_time: istTimeStr(ist)
   }).select().single();
   if (error) throw new Error(error.message);
-
-  // Wallet deduction for subscribers
   if (data.userType === 'subscriber' && data.payFromWallet) {
     const ph = cleanPhone(data.phone);
     const amount = Number(data.finalAmount) || 0;
     await deductWalletBalance(ph, amount, `Order ${order.order_id}`, data.userId);
   }
-
-  // Coupon usage
   if (data.couponCode) await incrementCouponUsage(data.couponCode, cleanPhone(data.phone));
-
   return { orderId: order.order_id };
 }
 
@@ -352,6 +347,24 @@ async function rejectOrder(data) {
   return true;
 }
 
+async function forceUdharOrder(data) {
+  if (!data.userId) throw new Error('userId required');
+  const items = Array.isArray(data.items) ? data.items : JSON.parse(data.items || '[]');
+  const ist = getIST();
+  const { data: order, error } = await supabase.from('orders').insert({
+    user_id: data.userId,
+    name: data.name, phone: cleanPhone(data.phone), address: data.address || '',
+    items: items,
+    total_amount: Number(data.totalAmount) || 0,
+    delivery_charge: 0, final_amount: Number(data.finalAmount) || 0,
+    coupon_code: '', discount: 0, user_type: 'subscriber',
+    payment_status: 'pending', order_status: 'pending',
+    order_date: istDateStr(ist), order_time: istTimeStr(ist)
+  }).select().single();
+  if (error) throw new Error(error.message);
+  return { orderId: order.order_id };
+}
+
 async function bulkOrdersWithBalance(data) {
   if (!data.orders || !Array.isArray(data.orders)) throw new Error('orders array required');
   const success = [], failed = [];
@@ -360,7 +373,7 @@ async function bulkOrdersWithBalance(data) {
     const amount = Number(o.finalAmount) || 0;
     try {
       const bal = await getWalletBalance(ph);
-      if (bal < amount) { failed.push({ phone: ph, name: o.name, reason: `Low balance ₹${bal}` }); continue; }
+      if (bal < amount) { failed.push({ phone: ph, name: o.name, reason: `Low balance â¹${bal}` }); continue; }
       const ist = getIST();
       const { data: order, error } = await supabase.from('orders').insert({
         user_id: o.userId || ph, name: o.name, phone: ph, address: o.address || '',
@@ -386,7 +399,7 @@ async function adminBulkCreate(data) {
       const amount = Number(o.finalAmount) || 0;
       if (o.deductWallet && amount > 0) {
         const bal = await getWalletBalance(ph);
-        if (bal < amount) { failed.push({ phone: ph, name: o.name, reason: `Low balance ₹${bal}` }); continue; }
+        if (bal < amount) { failed.push({ phone: ph, name: o.name, reason: `Low balance â¹${bal}` }); continue; }
       }
       const ist = getIST();
       const { data: order, error } = await supabase.from('orders').insert({
@@ -407,9 +420,9 @@ async function adminBulkCreate(data) {
   return { success, failed };
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // COUPONS
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function applyCoupon(data) {
   if (!data.code) throw new Error('Coupon code required');
   const { data: coupon } = await supabase.from('coupons')
@@ -423,12 +436,12 @@ async function applyCoupon(data) {
 
 async function incrementCouponUsage(code, phone) {
   try {
-    const { data: coupon } = await supabase.from('coupons').select('usage_count').eq('code', code.toUpperCase()).maybeSingle();
+    const { data: coupon } = await supabase.from('coupons').select('usage_count').eq('code', code).maybeSingle();
     if (!coupon) return;
-    let usageMap = {};
-    try { usageMap = JSON.parse(coupon.usage_count || '{}'); } catch { usageMap = {}; }
-    usageMap[phone] = (usageMap[phone] || 0) + 1;
-    await supabase.from('coupons').update({ usage_count: JSON.stringify(usageMap) }).eq('code', code.toUpperCase());
+    let usage = {};
+    try { usage = JSON.parse(coupon.usage_count || '{}'); } catch { usage = {}; }
+    usage[phone] = (usage[phone] || 0) + 1;
+    await supabase.from('coupons').update({ usage_count: JSON.stringify(usage) }).eq('code', code);
   } catch {}
 }
 
@@ -466,9 +479,9 @@ async function deleteCoupon(data) {
   return true;
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // SUBSCRIBERS
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function checkSubscriber(data) {
   if (!data.phone) return { isSubscriber: false };
   const ph = cleanPhone(data.phone);
@@ -555,9 +568,9 @@ async function promoteToSubscriber(data) {
   return { promoted: true, phone: ph };
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // RIDERS
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function createRider(data) {
   if (!data.name || !data.email || !data.password) throw new Error('name, email, password required');
   const hashed = await bcrypt.hash(String(data.password), 10);
@@ -616,9 +629,9 @@ async function assignRider(data) {
   return true;
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // STAFF
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function createStaff(data) {
   if (!data.username || !data.name || !data.password) throw new Error('username, name, password required');
   if (data.password.length < 6) throw new Error('Password must be 6+ chars');
@@ -656,9 +669,9 @@ async function getStaff() {
   return (staff || []).map(s => ({ username: s.username, name: s.name, status: s.status, createdAt: s.created_at }));
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // WALLET / KHATA
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function getWalletBalance(phone) {
   const ph = cleanPhone(phone);
   const { data: w } = await supabase.from('wallet').select('balance').eq('user_phone', ph).maybeSingle();
@@ -759,14 +772,9 @@ async function adminGetAllKhata() {
   }));
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // SETTINGS
-// ═══════════════════════════════════════════
-async function getSetting(key) {
-  const { data } = await supabase.from('admin_settings').select('access_level').eq('admin_id', key).maybeSingle();
-  return data?.access_level || null;
-}
-
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function upsertSetting(key, value) {
   await supabase.from('admin_settings').upsert({ admin_id: key, access_level: String(value) }, { onConflict: 'admin_id' });
 }
@@ -831,9 +839,9 @@ function getDefaultDay(d, name) {
   return { day: name || days[d], open: true, openTime: '07:00', lunchStart: '07:00', lunchEnd: '11:30', dinnerStart: '11:30', dinnerEnd: '19:30' };
 }
 
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 // ANALYTICS
-// ═══════════════════════════════════════════
+// âââââââââââââââââââââââââââââââââââââââââââ
 async function getAnalytics() {
   const ist = getIST();
   const today = istDateStr(ist);
