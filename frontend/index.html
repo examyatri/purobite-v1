@@ -1,1 +1,80 @@
-<h1>Puro Bite Live Hai</h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Puro Bite - Digital Menu & Orders</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js"></script>
+    <style>
+        :root { --primary: #e67e22; --secondary: #27ae60; --dark: #2c3e50; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; background: #f9f9f9; color: var(--dark); }
+        header { background: var(--primary); color: white; padding: 20px; text-align: center; shadow: 0 2px 5px rgba(0,0,0,0.1); }
+        .container { padding: 15px; max-width: 600px; margin: auto; }
+        .menu-card { background: white; border-radius: 12px; padding: 15px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 5px solid var(--secondary); }
+        .menu-info h3 { margin: 0; color: var(--dark); }
+        .menu-info p { margin: 5px 0; color: #666; font-size: 14px; }
+        .price { font-weight: bold; color: var(--primary); font-size: 18px; }
+        .badge { background: #eee; padding: 3px 8px; border-radius: 5px; font-size: 12px; }
+        #status { text-align: center; color: #666; margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>🍱 Puro Bite</h1>
+        <p>Varanasi's Healthy Tiffin Service</p>
+    </header>
+
+    <div class="container">
+        <h2>Today's Special Menu</h2>
+        <div id="menu-container">
+            <p id="status">Cooking fresh data... 👨‍🍳</p>
+        </div>
+    </div>
+
+    <script>
+        // 🔑 CONFIGURATION: Apni details yahan dalo
+        const SUPABASE_URL = 'https://wdnlwcvanctlbwrkljdc.supabase.co';
+        const SUPABASE_KEY = 'sb_publishable_j6CFQDw9b6GKxwtAg-Cw8g_qATOZABF'; // Pura paste karein
+
+        // Initialize Supabase
+        const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+        async function loadMenu() {
+            const container = document.getElementById('menu-container');
+            
+            // Database se Menu Table khincna
+            const { data, error } = await _supabase
+                .from('menu')
+                .select('*')
+                .eq('availability', true); // Sirf wahi jo available hain
+
+            if (error) {
+                console.error(error);
+                container.innerHTML = "<p>Error: Database connect nahi ho raha!</p>";
+                return;
+            }
+
+            if (data.length === 0) {
+                container.innerHTML = "<p id='status'>Aaj kitchen band hai. Kal milte hain! 👋</p>";
+                return;
+            }
+
+            // HTML Generate karna
+            container.innerHTML = data.map(item => `
+                <div class="menu-card">
+                    <div class="menu-info">
+                        <h3>${item.name} <span class="badge">${item.menu_type || 'Veg'}</span></h3>
+                        <p>${item.description || 'Delicious home-cooked meal'}</p>
+                        <span class="badge">${item.category}</span>
+                    </div>
+                    <div class="price">₹${item.price}</div>
+                </div>
+            `).join('');
+        }
+
+        // Run function on load
+        loadMenu();
+    </script>
+</body>
+</html>
