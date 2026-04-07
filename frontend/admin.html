@@ -772,7 +772,7 @@ async function api(action,data={}){
   const ctrl=new AbortController();
   const timer=setTimeout(()=>ctrl.abort(),25000);
   try{
-    const r=await fetch(CFG.GAS,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify({action,data,apiKey:CFG.KEY}),signal:ctrl.signal});
+    const r=await fetch(CFG.GAS,{method:'POST',headers:{'Content-Type':'application'},body:JSON.stringify({action,data,apiKey:CFG.KEY}),signal:ctrl.signal});
     clearTimeout(timer);
     const res=await r.json();
     if(!res.success) throw new Error(res.error||'API error');
