@@ -79,6 +79,7 @@ module.exports = async (req, res) => {
       case 'getUsers':             result = await getUsers(); break;
       case 'resetAdminPassword':   result = await resetAdminPassword(data); break;
       case 'forceUdharOrder':      result = await forceUdharOrder(data); break;
+      case 'deleteOldData':        result = await deleteOldData(data); break;
       default: return res.json({ success: false, error: 'Unknown action: ' + action });
     }
     return res.json({ success: true, data: result });
@@ -313,6 +314,62 @@ async function adminGetOrders() {
   return (orders || []).map(formatOrder);
 }
 
+// ─────────────────────────────────────────────────────────────
+// DATE / TIME NORMALIZERS
+// Supabase returns order_date as DATE ("2026-04-07") and
+// order_time as TIME ("09:35:00") when column types are DATE/TIME.
+// Frontend always expects "DD/MM/YYYY" and "HH:MM AM/PM".
+// These functions handle both raw Supabase values AND already-
+// formatted strings (so existing data is never broken).
+// ─────────────────────────────────────────────────────────────
+function normOrderDate(v) {
+  if (!v) return '';
+  const s = String(v).trim();
+  // Already DD/MM/YYYY — return as-is
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(s)) return s;
+  // YYYY-MM-DD (Supabase DATE type)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const [yyyy, mm, dd] = s.split('-');
+    return `${dd}/${mm}/${yyyy}`;
+  }
+  // ISO datetime — apply IST offset
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const ist = new Date(new Date(s).getTime() + 5.5 * 3600000);
+    if (!isNaN(ist.getTime())) {
+      return String(ist.getUTCDate()).padStart(2,'0') + '/' +
+             String(ist.getUTCMonth()+1).padStart(2,'0') + '/' +
+             ist.getUTCFullYear();
+    }
+  }
+  return s; // fallback — return as-is
+}
+
+function normOrderTime(v) {
+  if (!v) return '';
+  const s = String(v).trim();
+  // Already HH:MM AM/PM — return as-is
+  if (/^\d{1,2}:\d{2}\s*(AM|PM)$/i.test(s)) return s;
+  // HH:MM:SS (Supabase TIME type) or HH:MM
+  const m = s.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (m) {
+    let h = parseInt(m[1]), mn = parseInt(m[2]);
+    const p = h >= 12 ? 'PM' : 'AM';
+    h = h % 12 || 12;
+    return String(h).padStart(2,'0') + ':' + String(mn).padStart(2,'0') + ' ' + p;
+  }
+  // ISO datetime
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const ist = new Date(new Date(s).getTime() + 5.5 * 3600000);
+    if (!isNaN(ist.getTime())) {
+      let h = ist.getUTCHours(), mn = ist.getUTCMinutes();
+      const p = h >= 12 ? 'PM' : 'AM';
+      h = h % 12 || 12;
+      return String(h).padStart(2,'0') + ':' + String(mn).padStart(2,'0') + ' ' + p;
+    }
+  }
+  return s; // fallback
+}
+
 function formatOrder(o) {
   return {
     orderId: o.order_id,
@@ -327,7 +384,8 @@ function formatOrder(o) {
     userType: o.user_type || 'daily',
     paymentStatus: o.payment_status || 'pending',
     orderStatus: o.order_status || 'pending',
-    date: o.order_date, time: o.order_time,
+    date: normOrderDate(o.order_date),   // always "DD/MM/YYYY"
+    time: normOrderTime(o.order_time),   // always "HH:MM AM/PM"
     riderId: o.rider_id || ''
   };
 }
@@ -361,518 +419,4 @@ async function forceUdharOrder(data) {
     total_amount: Number(data.totalAmount) || 0,
     delivery_charge: 0, final_amount: Number(data.finalAmount) || 0,
     coupon_code: '', discount: 0, user_type: 'subscriber',
-    payment_status: 'pending', order_status: 'pending',
-    order_date: istDateStr(ist), order_time: istTimeStr(ist)
-  }).select().single();
-  if (error) throw new Error(error.message);
-  return { orderId: order.order_id };
-}
-
-async function bulkOrdersWithBalance(data) {
-  if (!data.orders || !Array.isArray(data.orders)) throw new Error('orders array required');
-  const success = [], failed = [];
-  for (const o of data.orders) {
-    const ph = cleanPhone(o.phone);
-    const amount = Number(o.finalAmount) || 0;
-    try {
-      const bal = await getWalletBalance(ph);
-      if (bal < amount) { failed.push({ phone: ph, name: o.name, reason: `Low balance â¹${bal}` }); continue; }
-      const ist = getIST();
-      const { data: order, error } = await supabase.from('orders').insert({
-        user_id: o.userId || ph, name: o.name, phone: ph, address: o.address || '',
-        items: o.items, total_amount: amount, delivery_charge: 0, final_amount: amount,
-        coupon_code: '', discount: 0, user_type: 'subscriber',
-        payment_status: 'pending', order_status: 'pending',
-        order_date: istDateStr(ist), order_time: istTimeStr(ist)
-      }).select().single();
-      if (error) throw new Error(error.message);
-      await deductWalletBalance(ph, amount, `Order ${order.order_id}`, o.userId);
-      success.push({ phone: ph, name: o.name, orderId: order.order_id });
-    } catch (err) { failed.push({ phone: ph, name: o.name, reason: err.message }); }
-  }
-  return { success, failed };
-}
-
-async function adminBulkCreate(data) {
-  if (!data.orders || !Array.isArray(data.orders)) throw new Error('orders array required');
-  const success = [], failed = [];
-  for (const o of data.orders) {
-    try {
-      const ph = cleanPhone(o.phone);
-      const amount = Number(o.finalAmount) || 0;
-      if (o.deductWallet && amount > 0) {
-        const bal = await getWalletBalance(ph);
-        if (bal < amount) { failed.push({ phone: ph, name: o.name, reason: `Low balance â¹${bal}` }); continue; }
-      }
-      const ist = getIST();
-      const { data: order, error } = await supabase.from('orders').insert({
-        user_id: o.userId || ph, name: o.name, phone: ph, address: o.address || '',
-        items: Array.isArray(o.items) ? o.items : JSON.parse(o.items || '[]'),
-        total_amount: amount, delivery_charge: 0, final_amount: amount,
-        coupon_code: '', discount: 0, user_type: o.userType || 'daily',
-        payment_status: 'pending', order_status: 'pending',
-        order_date: istDateStr(ist), order_time: istTimeStr(ist)
-      }).select().single();
-      if (error) throw new Error(error.message);
-      if (o.deductWallet && amount > 0) {
-        await deductWalletBalance(ph, amount, `Bulk Order ${order.order_id}`, o.userId);
-      }
-      success.push({ phone: ph, name: o.name, orderId: order.order_id });
-    } catch (err) { failed.push({ phone: o.phone, name: o.name, reason: err.message }); }
-  }
-  return { success, failed };
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// COUPONS
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function applyCoupon(data) {
-  if (!data.code) throw new Error('Coupon code required');
-  const { data: coupon } = await supabase.from('coupons')
-    .select('*').eq('code', data.code.toUpperCase()).maybeSingle();
-  if (!coupon) throw new Error('Invalid coupon code');
-  if (!coupon.is_active) throw new Error('Coupon not active');
-  if (coupon.expiry_date && new Date(coupon.expiry_date) < new Date()) throw new Error('Coupon expired');
-  if (coupon.user_phone && cleanPhone(coupon.user_phone) !== cleanPhone(data.phone || '')) throw new Error('Coupon not valid for your account');
-  return { code: coupon.code, discountType: coupon.discount_type, discountValue: Number(coupon.discount_value) || 0 };
-}
-
-async function incrementCouponUsage(code, phone) {
-  try {
-    const { data: coupon } = await supabase.from('coupons').select('usage_count').eq('code', code).maybeSingle();
-    if (!coupon) return;
-    let usage = {};
-    try { usage = JSON.parse(coupon.usage_count || '{}'); } catch { usage = {}; }
-    usage[phone] = (usage[phone] || 0) + 1;
-    await supabase.from('coupons').update({ usage_count: JSON.stringify(usage) }).eq('code', code);
-  } catch {}
-}
-
-async function createCoupon(data) {
-  if (!data.code || !data.discountType || !data.discountValue) throw new Error('code, discountType, discountValue required');
-  const { error } = await supabase.from('coupons').insert({
-    code: data.code.toUpperCase(),
-    discount_type: data.discountType,
-    discount_value: Number(data.discountValue),
-    expiry_date: data.expiryDate || null,
-    user_phone: data.userPhone || null,
-    is_active: true,
-    usage_count: '{}'
-  });
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function adminGetCoupons() {
-  const { data: coupons, error } = await supabase.from('coupons').select('*');
-  if (error) throw new Error(error.message);
-  return (coupons || []).map(c => ({
-    code: c.code, discountType: c.discount_type,
-    discountValue: c.discount_value, expiryDate: c.expiry_date,
-    userPhone: c.user_phone, isActive: c.is_active,
-    perUserLimit: c.per_user_limit || 0,
-    usageCount: (() => { try { return JSON.parse(c.usage_count || '{}'); } catch { return {}; } })()
-  }));
-}
-
-async function deleteCoupon(data) {
-  if (!data.code) throw new Error('code required');
-  const { error } = await supabase.from('coupons').delete().eq('code', data.code.toUpperCase());
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// SUBSCRIBERS
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function checkSubscriber(data) {
-  if (!data.phone) return { isSubscriber: false };
-  const ph = cleanPhone(data.phone);
-  const { data: sub } = await supabase.from('subscribers').select('is_active').eq('phone', ph).maybeSingle();
-  return { isSubscriber: !!(sub && sub.is_active) };
-}
-
-async function adminGetSubscribers() {
-  const { data: subs, error } = await supabase.from('subscribers').select('*');
-  if (error) throw new Error(error.message);
-  const { data: wallets } = await supabase.from('wallet').select('*');
-  const balMap = {};
-  (wallets || []).forEach(w => { balMap[w.user_phone] = Number(w.balance) || 0; });
-  return (subs || []).map(s => ({
-    phone: s.phone, name: s.name || '', address: s.address || '',
-    startDate: s.start_date, plan: s.plan || s.plan_type || 'both',
-    status: s.is_active ? 'active' : 'paused',
-    balance: balMap[s.phone] || 0
-  }));
-}
-
-async function addSubscriber(data) {
-  if (!data.phone) throw new Error('phone required');
-  const ph = cleanPhone(data.phone);
-  const { error } = await supabase.from('subscribers').insert({
-    phone: ph, name: data.name || '', address: data.address || '',
-    plan: data.plan || 'both', plan_type: data.plan || 'both',
-    is_active: true, start_date: new Date().toISOString().split('T')[0]
-  });
-  if (error) throw new Error(error.message);
-  if (data.initialRecharge && Number(data.initialRecharge) > 0) {
-    await rechargeWallet({ phone: ph, amount: data.initialRecharge, note: 'Initial recharge' });
-  }
-  return true;
-}
-
-async function updateSubscriber(data) {
-  if (!data.phone) throw new Error('phone required');
-  const ph = cleanPhone(data.phone);
-  const updates = {};
-  if (data.name !== undefined) updates.name = data.name;
-  if (data.address !== undefined) updates.address = data.address;
-  if (data.plan !== undefined) { updates.plan = data.plan; updates.plan_type = data.plan; }
-  if (data.status !== undefined) updates.is_active = data.status === 'active';
-  const { error } = await supabase.from('subscribers').update(updates).eq('phone', ph);
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function removeSubscriber(data) {
-  if (!data.phone) throw new Error('phone required');
-  const { error } = await supabase.from('subscribers').delete().eq('phone', cleanPhone(data.phone));
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function getUserByPhone(data) {
-  if (!data.phone) throw new Error('phone required');
-  const ph = cleanPhone(data.phone);
-  const { data: user } = await supabase.from('users').select('*').eq('phone', ph).maybeSingle();
-  if (!user) throw new Error('No registered user found with this phone number');
-  const { data: sub } = await supabase.from('subscribers').select('is_active').eq('phone', ph).maybeSingle();
-  return {
-    userId: user.user_id, name: user.name, phone: user.phone,
-    email: user.email || '', address: user.address || '',
-    alreadySubscriber: !!(sub && sub.is_active)
-  };
-}
-
-async function promoteToSubscriber(data) {
-  if (!data.phone) throw new Error('phone required');
-  const ph = cleanPhone(data.phone);
-  const { data: existing } = await supabase.from('subscribers').select('phone').eq('phone', ph).maybeSingle();
-  if (existing) throw new Error('User is already a subscriber');
-  const { error } = await supabase.from('subscribers').insert({
-    phone: ph, name: data.name || '', address: data.address || '',
-    plan: data.plan || 'both', plan_type: data.plan || 'both',
-    is_active: true, start_date: new Date().toISOString().split('T')[0]
-  });
-  if (error) throw new Error(error.message);
-  if (data.initialRecharge && Number(data.initialRecharge) > 0) {
-    await rechargeWallet({ phone: ph, amount: data.initialRecharge, note: 'Promoted to subscriber' });
-  }
-  return { promoted: true, phone: ph };
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// RIDERS
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function createRider(data) {
-  if (!data.name || !data.email || !data.password) throw new Error('name, email, password required');
-  const hashed = await bcrypt.hash(String(data.password), 10);
-  const { data: rider, error } = await supabase.from('riders').insert({
-    name: data.name, email: data.email, password: hashed
-  }).select().single();
-  if (error) throw new Error(error.message);
-  return { riderId: rider.rider_id };
-}
-
-async function updateRider(data) {
-  if (!data.riderId) throw new Error('riderId required');
-  const updates = {};
-  if (data.name !== undefined) updates.name = data.name;
-  if (data.email !== undefined) updates.email = data.email;
-  if (data.password && data.password.length >= 6) updates.password = await bcrypt.hash(String(data.password), 10);
-  const { error } = await supabase.from('riders').update(updates).eq('rider_id', data.riderId);
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function deleteRider(data) {
-  if (!data.riderId) throw new Error('riderId required');
-  const { error } = await supabase.from('riders').delete().eq('rider_id', data.riderId);
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function riderLogin(data) {
-  if (!data.email || !data.password) throw new Error('Email and password required');
-  const { data: rider } = await supabase.from('riders').select('*').eq('email', data.email).maybeSingle();
-  if (!rider) throw new Error('Invalid credentials');
-  const match = await bcrypt.compare(String(data.password), rider.password);
-  if (!match) throw new Error('Invalid credentials');
-  return { riderId: rider.rider_id, name: rider.name, email: rider.email };
-}
-
-async function getRiderOrders(data) {
-  if (!data.riderId) throw new Error('riderId required');
-  const { data: orders, error } = await supabase.from('orders').select('*')
-    .or(`rider_id.eq.${data.riderId},order_status.eq.preparing,order_status.eq.pending`);
-  if (error) throw new Error(error.message);
-  return (orders || []).map(formatOrder);
-}
-
-async function getRiders() {
-  const { data: riders, error } = await supabase.from('riders').select('rider_id, name, email');
-  if (error) throw new Error(error.message);
-  return (riders || []).map(r => ({ riderId: r.rider_id, name: r.name, email: r.email }));
-}
-
-async function assignRider(data) {
-  if (!data.orderId || !data.riderId) throw new Error('orderId and riderId required');
-  const { error } = await supabase.from('orders').update({ rider_id: data.riderId }).eq('order_id', data.orderId);
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// STAFF
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function createStaff(data) {
-  if (!data.username || !data.name || !data.password) throw new Error('username, name, password required');
-  if (data.password.length < 6) throw new Error('Password must be 6+ chars');
-  const hashed = await bcrypt.hash(String(data.password), 10);
-  const { error } = await supabase.from('staff').insert({
-    username: data.username, name: data.name,
-    password: hashed, status: data.status || 'active',
-    created_at: new Date().toISOString()
-  });
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function updateStaff(data) {
-  if (!data.username) throw new Error('username required');
-  const updates = {};
-  if (data.name !== undefined) updates.name = data.name;
-  if (data.status !== undefined) updates.status = data.status;
-  if (data.password && data.password.length >= 6) updates.password = await bcrypt.hash(String(data.password), 10);
-  const { error } = await supabase.from('staff').update(updates).eq('username', data.username);
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function deleteStaff(data) {
-  if (!data.username) throw new Error('username required');
-  const { error } = await supabase.from('staff').delete().eq('username', data.username);
-  if (error) throw new Error(error.message);
-  return true;
-}
-
-async function getStaff() {
-  const { data: staff, error } = await supabase.from('staff').select('username, name, status, created_at');
-  if (error) throw new Error(error.message);
-  return (staff || []).map(s => ({ username: s.username, name: s.name, status: s.status, createdAt: s.created_at }));
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// WALLET / KHATA
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function getWalletBalance(phone) {
-  const ph = cleanPhone(phone);
-  const { data: w } = await supabase.from('wallet').select('balance').eq('user_phone', ph).maybeSingle();
-  return Number(w?.balance) || 0;
-}
-
-async function deductWalletBalance(phone, amount, note, userId) {
-  const ph = cleanPhone(phone);
-  const currentBal = await getWalletBalance(ph);
-  const newBal = currentBal - amount;
-  await supabase.from('wallet').upsert({ user_phone: ph, balance: newBal, last_updated: new Date().toISOString() }, { onConflict: 'user_phone' });
-  const ist = getIST();
-  await supabase.from('khata_transactions').insert({
-    user_id: userId || null, amount: -amount, type: 'debit',
-    description: note || 'Deduction', created_at: ist.toISOString()
-  });
-  return newBal;
-}
-
-async function getSubscriberBalance(data) {
-  if (!data.phone) throw new Error('phone required');
-  const bal = await getWalletBalance(data.phone);
-  return { balance: bal };
-}
-
-async function rechargeWallet(data) {
-  if (!data.phone || !data.amount) throw new Error('phone and amount required');
-  const ph = cleanPhone(data.phone);
-  const amt = Math.abs(Number(data.amount));
-  const currentBal = await getWalletBalance(ph);
-  const newBal = currentBal + amt;
-  await supabase.from('wallet').upsert({ user_phone: ph, balance: newBal, last_updated: new Date().toISOString() }, { onConflict: 'user_phone' });
-  const ist = getIST();
-  const { data: user } = await supabase.from('users').select('user_id').eq('phone', ph).maybeSingle();
-  await supabase.from('khata_transactions').insert({
-    user_id: user?.user_id || null, amount: amt, type: 'credit',
-    description: data.note || 'Wallet recharge', created_at: ist.toISOString()
-  });
-  return { newBalance: newBal };
-}
-
-async function addKhataEntry(data) {
-  if (!data.phone) throw new Error('phone required');
-  const ph = cleanPhone(data.phone);
-  const amount = Number(data.amount) || 0;
-  const currentBal = await getWalletBalance(ph);
-  const newBal = currentBal + amount;
-  await supabase.from('wallet').upsert({ user_phone: ph, balance: newBal, last_updated: new Date().toISOString() }, { onConflict: 'user_phone' });
-  const { data: user } = await supabase.from('users').select('user_id').eq('phone', ph).maybeSingle();
-  const ist = getIST();
-  await supabase.from('khata_transactions').insert({
-    user_id: user?.user_id || null, amount,
-    type: amount >= 0 ? 'credit' : 'debit',
-    description: data.note || '', created_at: ist.toISOString()
-  });
-  return { newBalance: newBal };
-}
-
-async function getKhata(data) {
-  if (!data.phone) throw new Error('phone required');
-  const ph = cleanPhone(data.phone);
-  const { data: user } = await supabase.from('users').select('user_id').eq('phone', ph).maybeSingle();
-  let txns = [];
-  if (user) {
-    const { data: t } = await supabase.from('khata_transactions').select('*')
-      .eq('user_id', user.user_id).order('created_at', { ascending: true });
-    txns = t || [];
-  }
-  const bal = await getWalletBalance(ph);
-  let running = 0;
-  const entries = txns.map(t => {
-    running += Number(t.amount) || 0;
-    const ist = new Date(new Date(t.created_at).getTime() + 5.5 * 3600000);
-    return {
-      entryId: t.id, phone: ph,
-      type: t.type === 'credit' ? 'recharge' : 'tiffin_given',
-      amount: Number(t.amount),
-      note: t.description || '',
-      orderId: '',
-      date: istDateStr(ist),
-      time: istTimeStr(ist),
-      createdBy: 'system',
-      runningBalance: running
-    };
-  });
-  return { entries, balance: bal };
-}
-
-async function adminGetAllKhata() {
-  const { data: subs } = await supabase.from('subscribers').select('phone, name');
-  const { data: wallets } = await supabase.from('wallet').select('*');
-  const balMap = {};
-  (wallets || []).forEach(w => { balMap[w.user_phone] = Number(w.balance) || 0; });
-  return (subs || []).map(s => ({
-    phone: s.phone, name: s.name || '',
-    balance: balMap[s.phone] || 0,
-    entryCount: 0
-  }));
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// SETTINGS
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function upsertSetting(key, value) {
-  await supabase.from('admin_settings').upsert({ admin_id: key, access_level: String(value) }, { onConflict: 'admin_id' });
-}
-
-async function getOrderCutoff() {
-  const { data: rows } = await supabase.from('admin_settings').select('*');
-  const map = {};
-  (rows || []).forEach(r => { map[r.admin_id] = r.access_level; });
-  const sched = {};
-  for (let d = 0; d <= 6; d++) {
-    try { sched[d] = JSON.parse(map['schedule_' + d] || 'null') || getDefaultDay(d); } catch { sched[d] = getDefaultDay(d); }
-  }
-  return {
-    enabled: map['cutoff_enabled'] === 'true',
-    cutoffDay: map['cutoff_day'] || '11:30',
-    cutoffNight: map['cutoff_night'] || '19:30',
-    weeklySchedule: sched
-  };
-}
-
-async function setOrderCutoff(data) {
-  await upsertSetting('cutoff_enabled', data.enabled ? 'true' : 'false');
-  if (data.cutoffDay) await upsertSetting('cutoff_day', data.cutoffDay);
-  if (data.cutoffNight) await upsertSetting('cutoff_night', data.cutoffNight);
-  return true;
-}
-
-async function getWeeklySchedule() {
-  const { data: rows } = await supabase.from('admin_settings').select('*');
-  const map = {};
-  (rows || []).forEach(r => { map[r.admin_id] = r.access_level; });
-  const result = {};
-  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  for (let d = 0; d <= 6; d++) {
-    try { result[d] = JSON.parse(map['schedule_' + d] || 'null') || getDefaultDay(d, days[d]); }
-    catch { result[d] = getDefaultDay(d, days[d]); }
-  }
-  return result;
-}
-
-async function setWeeklySchedule(data) {
-  if (!data.schedule) throw new Error('schedule required');
-  for (let d = 0; d <= 6; d++) {
-    if (data.schedule[d]) await upsertSetting('schedule_' + d, JSON.stringify(data.schedule[d]));
-  }
-  return true;
-}
-
-async function getKhataEnabled() {
-  const { data } = await supabase.from('admin_settings').select('access_level').eq('admin_id', 'khata_enabled').maybeSingle();
-  const v = data?.access_level;
-  return { enabled: v === null || v === undefined || v === 'true' || v === '1' };
-}
-
-async function setKhataEnabled(data) {
-  await upsertSetting('khata_enabled', data.enabled ? 'true' : 'false');
-  return true;
-}
-
-function getDefaultDay(d, name) {
-  const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-  return { day: name || days[d], open: true, openTime: '07:00', lunchStart: '07:00', lunchEnd: '11:30', dinnerStart: '11:30', dinnerEnd: '19:30' };
-}
-
-// âââââââââââââââââââââââââââââââââââââââââââ
-// ANALYTICS
-// âââââââââââââââââââââââââââââââââââââââââââ
-async function getAnalytics() {
-  const ist = getIST();
-  const today = istDateStr(ist);
-  const { data: orders } = await supabase.from('orders').select('final_amount, order_date, order_status');
-  const { data: users } = await supabase.from('users').select('user_id');
-  const { data: subs } = await supabase.from('subscribers').select('phone');
-  const { data: wallets } = await supabase.from('wallet').select('balance');
-  const todayOrders = (orders || []).filter(o => o.order_date === today);
-  const todayRevenue = todayOrders.reduce((s, o) => s + (Number(o.final_amount) || 0), 0);
-  const thisMonth = ist.getUTCMonth(), thisYear = ist.getUTCFullYear();
-  const monthlyRevenue = (orders || []).filter(o => {
-    if (!o.order_date) return false;
-    const parts = String(o.order_date).split('/');
-    if (parts.length === 3) return parseInt(parts[1]) - 1 === thisMonth && parseInt(parts[2]) === thisYear;
-    return false;
-  }).reduce((s, o) => s + (Number(o.final_amount) || 0), 0);
-  const totalWallet = (wallets || []).reduce((s, w) => s + (Number(w.balance) || 0), 0);
-  return {
-    todayOrders: todayOrders.length, todayRevenue,
-    monthlyRevenue, totalOrders: (orders || []).length,
-    totalUsers: (users || []).length,
-    totalSubscribers: (subs || []).length,
-    totalWalletBalance: totalWallet
-  };
-}
-
-async function getUsers() {
-  const { data: users, error } = await supabase.from('users').select('user_id, name, phone, email, address, created_at');
-  if (error) throw new Error(error.message);
-  return (users || []).map(u => ({ userId: u.user_id, name: u.name, phone: u.phone, email: u.email || '', address: u.address || '', createdAt: u.created_at }));
-}
+    payment_status: 'pending', order
