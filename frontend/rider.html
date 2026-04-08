@@ -292,7 +292,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
       <div class="filter-row">
         <span class="f-label">📅 Date</span>
         <input type="date" class="f-date" id="active-filter-date" onchange="renderActive()">
-        <button class="f-clr" onclick="doc('active-filter-date').value=riderTodayISO();renderActive()">✕</button>
+        <button class="f-clr" onclick="doc('active-filter-date').value='';renderActive()" title="Clear date filter">✕</button>
       </div>
       <div class="filter-row">
         <span class="f-label">🕐 Slot</span>
@@ -303,7 +303,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
         </select>
       </div>
       <div class="filter-acts">
-        <button class="f-reset" onclick="doc('active-filter-date').value=riderTodayISO();doc('active-filter-slot').value='all';renderActive()">Reset Filters</button>
+        <button class="f-reset" onclick="doc('active-filter-date').value='';doc('active-filter-slot').value='all';renderActive()">Reset Filters</button>
       </div>
     </div>
   </div>
@@ -318,7 +318,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
       <div class="filter-row">
         <span class="f-label">📅 Date</span>
         <input type="date" class="f-date" id="filter-date" onchange="renderDelivered()">
-        <button class="f-clr" onclick="doc('filter-date').value=riderTodayISO();renderDelivered()">✕</button>
+        <button class="f-clr" onclick="doc('filter-date').value='';renderDelivered()" title="Clear date filter">✕</button>
       </div>
       <div class="filter-row">
         <span class="f-label">🕐 Slot</span>
