@@ -211,7 +211,7 @@ tr:hover td{background:#fafafa}
     <div style="margin-top:14px;padding:12px;background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0">
       <div style="font-size:11px;font-weight:700;color:#64748b;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">⚙️ Credentials Setup</div>
       <div style="font-size:12px;color:#64748b;line-height:1.6">
-        Default: <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px">admin@purobite.com</code> / <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px">admin123</code><br>
+        Default: <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px"><a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="1a7b7e7773745a6a6f687578736e7f34797577">[email&#160;protected]</a></code> / <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px">admin123</code><br>
         To change, run <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px">setupSheets()</code> once in Apps Script, or update <strong>Settings sheet</strong> → <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px">admin_email</code> / <code style="background:#e2e8f0;padding:1px 5px;border-radius:4px;font-size:11px">admin_password</code> rows.
       </div>
     </div>
@@ -808,12 +808,12 @@ tr:hover td{background:#fafafa}
 </div></div>
 
 <div class="toast" id="toast"></div>
-<script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script>
 // ════════════════════════════════════════════════
 // CONFIG
 // ════════════════════════════════════════════════
   const CFG = {
-    'GAS': 'https://purobite.vercel.app/api',
+    'GAS': 'https://purobite-v1.vercel.app/api',
     'KEY': 'PB_SECURE_API_KEY_2026'
   };
 
@@ -2690,20 +2690,20 @@ async function deleteOldData(){
 
 
 // ════════════════════════════════════════════════
-// STARTUP — Session restore + auto-refresh
+// STARTUP — Session restore
 // ════════════════════════════════════════════════
 window.addEventListener('DOMContentLoaded',()=>{
   // Dismiss loader — immediately stop blocking clicks, then fade out
   const loader=document.getElementById('admin-loader');
   const dismissLoader=()=>{
     if(!loader) return;
-    loader.style.pointerEvents='none'; // stop blocking immediately
+    loader.style.pointerEvents='none';
     loader.style.opacity='0';
     setTimeout(()=>{ loader.style.display='none'; },380);
   };
-  // Clean up any legacy data
+  // Clean up legacy data
   try{ localStorage.removeItem('pb_admin'); }catch{}
-  // ── Try to restore session from sessionStorage (survives F5, fixes logout issue) ──
+  // ── Try to restore session (localStorage 24h expiry) ──
   const saved=SStore.get();
   if(saved && saved.role){
     _adminSession=saved;
