@@ -232,11 +232,11 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
   <nav class="rider-nav">
     <div class="r-info">
       <h3 id="r-name">Rider</h3>
-      <p><span class="dot"></span>Online · Ready for delivery</p>
+      <p><span class="dot"></span><span id="last-refreshed-lbl" style="font-size:11px;color:var(--mu)">Online · Ready</span></p>
     </div>
     <div style="display:flex;gap:6px">
       <button class="btn btn-ghost btn-sm" onclick="exportPDF()" title="Export PDF"><i class="fa-solid fa-file-pdf"></i></button>
-      <button class="btn btn-ghost btn-sm" onclick="loadOrders()" title="Refresh"><i class="fa-solid fa-rotate"></i></button>
+      <button class="btn btn-ghost btn-sm" onclick="loadOrders()" title="Refresh orders"><i class="fa-solid fa-rotate"></i></button>
       <button class="btn btn-ghost btn-sm" onclick="doLogout()" title="Logout"><i class="fa-solid fa-right-from-bracket"></i></button>
     </div>
   </nav>
@@ -292,7 +292,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
       <div class="filter-row">
         <span class="f-label">📅 Date</span>
         <input type="date" class="f-date" id="active-filter-date" onchange="renderActive()">
-        <button class="f-clr" onclick="doc('active-filter-date').value='';renderActive()">✕</button>
+        <button class="f-clr" onclick="doc('active-filter-date').value=riderTodayISO();renderActive()">✕</button>
       </div>
       <div class="filter-row">
         <span class="f-label">🕐 Slot</span>
@@ -303,7 +303,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
         </select>
       </div>
       <div class="filter-acts">
-        <button class="f-reset" onclick="doc('active-filter-date').value='';doc('active-filter-slot').value='all';renderActive()">Reset Filters</button>
+        <button class="f-reset" onclick="doc('active-filter-date').value=riderTodayISO();doc('active-filter-slot').value='all';renderActive()">Reset Filters</button>
       </div>
     </div>
   </div>
@@ -318,7 +318,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
       <div class="filter-row">
         <span class="f-label">📅 Date</span>
         <input type="date" class="f-date" id="filter-date" onchange="renderDelivered()">
-        <button class="f-clr" onclick="doc('filter-date').value='';renderDelivered()">✕</button>
+        <button class="f-clr" onclick="doc('filter-date').value=riderTodayISO();renderDelivered()">✕</button>
       </div>
       <div class="filter-row">
         <span class="f-label">🕐 Slot</span>
@@ -329,7 +329,7 @@ body{font-family:var(--fb);background:var(--bg);color:var(--tx);max-width:520px;
         </select>
       </div>
       <div class="filter-acts">
-        <button class="f-reset" onclick="doc('filter-date').value='';doc('filter-slot').value='all';renderDelivered()">Reset Filters</button>
+        <button class="f-reset" onclick="doc('filter-date').value=riderTodayISO();doc('filter-slot').value='all';renderDelivered()">Reset Filters</button>
       </div>
     </div>
   </div>
@@ -391,10 +391,32 @@ const RCreds={
 };
 
 // sessionStorage for rider — survives F5, fixes frequent logout
+const _RIDER_SESS_TTL = 24 * 60 * 60 * 1000;
 const RSess={
-  save:(r)=>{try{sessionStorage.setItem('pb_rider_sess',JSON.stringify(r));}catch{}},
-  get:()=>{try{return JSON.parse(sessionStorage.getItem('pb_rider_sess'));}catch{return null;}},
-  clear:()=>{try{sessionStorage.removeItem('pb_rider_sess');}catch{}}
+  save:(r)=>{
+    const p=JSON.stringify({data:r,exp:Date.now()+_RIDER_SESS_TTL});
+    try{localStorage.setItem('pb_rider_sess',p);}catch{}
+    try{sessionStorage.setItem('pb_rider_sess',p);}catch{}
+  },
+  get:()=>{
+    let raw=null;
+    try{raw=localStorage.getItem('pb_rider_sess');}catch{}
+    if(!raw){try{raw=sessionStorage.getItem('pb_rider_sess');}catch{}}
+    if(!raw) return null;
+    try{
+      const p=JSON.parse(raw);
+      if(p.exp&&Date.now()>p.exp){
+        try{localStorage.removeItem('pb_rider_sess');}catch{}
+        try{sessionStorage.removeItem('pb_rider_sess');}catch{}
+        return null;
+      }
+      return p.data||p;
+    }catch{return null;}
+  },
+  clear:()=>{
+    try{localStorage.removeItem('pb_rider_sess');}catch{}
+    try{sessionStorage.removeItem('pb_rider_sess');}catch{}
+  }
 };
 
 function togglePw(id,btn){
@@ -437,6 +459,10 @@ function showApp(){
   doc('pg-auth').style.display='none';
   doc('pg-app').style.display='block';
   doc('r-name').textContent='Hi, '+(_rider.name||'Rider')+' 👋';
+  // Pre-fill date filters with today (YYYY-MM-DD)
+  const todayVal=riderTodayISO();
+  const af=doc('active-filter-date'); if(af&&!af.value) af.value=todayVal;
+  const df=doc('filter-date'); if(df&&!df.value) df.value=todayVal;
   loadOrders();
 }
 
@@ -473,6 +499,7 @@ async function loadOrders(){
         const tb=Number(String(b.orderId).replace('PB-','').split('-')[0])||0;
         return tb-ta; // newest first
       });
+    _markRefreshed();
     updateStats();
     updateTabCounts();
     if(_currentTab==='active') renderActive();
@@ -533,6 +560,12 @@ function matchesSearch(o){
 }
 
 // ══ TIME / DATE HELPERS ══
+// riderTodayISO → "YYYY-MM-DD" in IST
+function riderTodayISO(){
+  const ist=new Date(Date.now()+5.5*3600000);
+  return ist.getUTCFullYear()+'-'+String(ist.getUTCMonth()+1).padStart(2,'0')+'-'+String(ist.getUTCDate()).padStart(2,'0');
+}
+
 function getOrderHour(t){
   if(!t&&t!==0) return -1;
   if(t instanceof Date){const i=new Date(t.getTime()+5.5*3600000);return i.getUTCHours()+i.getUTCMinutes()/60;}
@@ -548,14 +581,14 @@ function isDayOrder(o){const h=getOrderHour(o.time);return h<0?false:h<_dayCutof
 
 function orderDateToISO(d){
   if(!d&&d!==0) return '';
-  if(d instanceof Date){const i=new Date(d.getTime()+5.5*3600000);return `${i.getUTCFullYear()}-${String(i.getUTCMonth()+1).padStart(2,'0')}-${String(i.getUTCDate()).padStart(2,'0')}`;}
   const s=String(d).trim();
-  // DD/MM/YYYY
-  if(/^\d{2}\/\d{2}\/\d{4}$/.test(s)){const[dd,mm,yyyy]=s.split('/');return `${yyyy}-${mm}-${dd}`;}
-  // YYYY-MM-DD
+  // YYYY-MM-DD (new backend ISO format) — return as-is
   if(/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // DD/MM/YYYY (legacy format)
+  if(/^\d{2}\/\d{2}\/\d{4}$/.test(s)){const[dd,mm,yyyy]=s.split('/');return `${yyyy}-${mm}-${dd}`;}
   // ISO datetime — apply IST offset
   if(/^\d{4}-\d{2}-\d{2}T/.test(s)){const i=new Date(new Date(s).getTime()+5.5*3600000);if(!isNaN(i.getTime())) return `${i.getUTCFullYear()}-${String(i.getUTCMonth()+1).padStart(2,'0')}-${String(i.getUTCDate()).padStart(2,'0')}`;}
+  if(d instanceof Date){const i=new Date(d.getTime()+5.5*3600000);return `${i.getUTCFullYear()}-${String(i.getUTCMonth()+1).padStart(2,'0')}-${String(i.getUTCDate()).padStart(2,'0')}`;}
   return '';
 }
 
@@ -924,6 +957,21 @@ function esc(s){if(!s) return '';return String(s).replace(/&/g,'&amp;').replace(
 function toast(msg){const t=doc('toast');t.textContent=msg;t.classList.add('on');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('on'),3000);}
 function safeP(v){if(Array.isArray(v)) return v;if(typeof v==='object'&&v!==null) return v;if(!v||typeof v!=='string') return [];try{return JSON.parse(v);}catch{return [];}}
 
+// Last-refreshed tracker — no setInterval polling, manual only
+let _lastRefreshedAt=null;
+function _markRefreshed(){
+  _lastRefreshedAt=Date.now();
+  _updateRefreshLabel();
+}
+function _updateRefreshLabel(){
+  const el=doc('last-refreshed-lbl');
+  if(!el||!_lastRefreshedAt) return;
+  const mins=Math.floor((Date.now()-_lastRefreshedAt)/60000);
+  el.textContent=mins<1?'Just refreshed':`Refreshed ${mins} min ago`;
+}
+// Passive label update every minute (no API call)
+setInterval(_updateRefreshLabel,60000);
+
 window.addEventListener('DOMContentLoaded',()=>{
   const loader=document.getElementById('rider-loader');
   const dismissLoader=()=>{
@@ -944,9 +992,6 @@ window.addEventListener('DOMContentLoaded',()=>{
   dismissLoader();
   autofillRiderCreds();
 });
-
-// Poll every 30 seconds (was 60s) for real-time order updates
-setInterval(()=>{if(_rider && !document.hidden && !_isLoading) loadOrders();},30000);
 </script>
 </body>
 </html>
