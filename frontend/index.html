@@ -687,6 +687,10 @@ textarea.inp{resize:vertical;min-height:72px}
     <span class="pg-title">My Orders</span>
     <button class="btn-ghost btn btn-sm" onclick="loadOrders()"><i class="fa-solid fa-rotate"></i></button>
   </div>
+  <div style="padding:8px 18px 2px;display:flex;align-items:center;justify-content:space-between">
+    <span style="font-size:12px;color:var(--gr);font-weight:600">Last 5 orders</span>
+    <span id="orders-refresh-lbl" style="font-size:11px;color:var(--gr)"></span>
+  </div>
   <div class="pg-body" id="orders-list">
     <div class="sk sk-lg"></div><div class="sk sk-lg"></div>
   </div>
@@ -895,7 +899,7 @@ textarea.inp{resize:vertical;min-height:72px}
 // CONFIG
 // ══════════════════════════════════════════════
   const CFG = {
-    'GAS': 'https://purobite.vercel.app/api',
+    'GAS': 'https://purobite-v1.vercel.app/api',
     'KEY': 'PB_SECURE_API_KEY_2026',
     'WA': '919889760350',
     'TIFFIN': '919889760350'
@@ -1244,11 +1248,33 @@ const Creds = {
   clear: ()        => Store.remove('pb_creds')
 };
 
-// Session store in sessionStorage — survives F5, not tab close
+// Session store — localStorage with 24h expiry + sessionStorage fallback
+const SESS_TTL = 24 * 60 * 60 * 1000; // 24 hours
 const SessStore = {
-  save: (u) => { try { sessionStorage.setItem('pb_user_sess', JSON.stringify(u)); } catch {} },
-  get:  ()  => { try { return JSON.parse(sessionStorage.getItem('pb_user_sess')); } catch { return null; } },
-  clear:()  => { try { sessionStorage.removeItem('pb_user_sess'); } catch {} }
+  save: (u) => {
+    const payload = JSON.stringify({ data: u, exp: Date.now() + SESS_TTL });
+    try { localStorage.setItem('pb_user_sess', payload); } catch {}
+    try { sessionStorage.setItem('pb_user_sess', payload); } catch {}
+  },
+  get: () => {
+    let raw = null;
+    try { raw = localStorage.getItem('pb_user_sess'); } catch {}
+    if (!raw) { try { raw = sessionStorage.getItem('pb_user_sess'); } catch {} }
+    if (!raw) return null;
+    try {
+      const p = JSON.parse(raw);
+      if (p.exp && Date.now() > p.exp) {
+        try { localStorage.removeItem('pb_user_sess'); } catch {}
+        try { sessionStorage.removeItem('pb_user_sess'); } catch {}
+        return null;
+      }
+      return p.data || p; // handle both new {data,exp} and legacy plain format
+    } catch { return null; }
+  },
+  clear: () => {
+    try { localStorage.removeItem('pb_user_sess'); } catch {}
+    try { sessionStorage.removeItem('pb_user_sess'); } catch {}
+  }
 };
 
 const Auth = {
@@ -1970,11 +1996,25 @@ function showOrderConfirmation({ orderId, user, cart, sub, del, disc, total, isS
 // ══════════════════════════════════════════════
 // ORDERS
 // ══════════════════════════════════════════════
+let _userLastRefreshed = null;
+function _userMarkRefreshed() {
+  _userLastRefreshed = Date.now();
+  _userUpdateRefreshLbl();
+}
+function _userUpdateRefreshLbl() {
+  const el = doc('orders-refresh-lbl');
+  if (!el || !_userLastRefreshed) return;
+  const mins = Math.floor((Date.now() - _userLastRefreshed) / 60000);
+  el.textContent = mins < 1 ? 'Just now' : `${mins}m ago`;
+}
+setInterval(_userUpdateRefreshLbl, 60000);
+
 async function loadOrders() {
   const el = doc('orders-list'), user = Auth.get(); if (!user) return;
-  el.innerHTML = '<div class="sk sk-lg"></div><div class="sk sk-lg"></div><div class="sk sk-lg"></div>';
+  el.innerHTML = '<div class="sk sk-lg"></div><div class="sk sk-lg"></div>';
   try {
     const orders = await api('getUserOrders', { userId: user.userId });
+    _userMarkRefreshed();
     renderOrders(orders);
   } catch(e) {
     el.innerHTML = `<div class="empty"><span class="em">😕</span><h3>Load failed</h3><p style="color:#888;font-size:13px;margin-bottom:12px">Internet check karein aur retry karein</p><button class="btn btn-p" style="width:auto;padding:10px 24px" onclick="loadOrders()"><i class="fa-solid fa-rotate-right"></i> Retry</button></div>`;
@@ -2115,59 +2155,21 @@ function exportUserKhataPDF() {
 // ══════════════════════════════════════════════
 // REAL-TIME POLLING (wallet + orders every 30s)
 // ══════════════════════════════════════════════
-let _pollTimer = null;
-
 // ── KHATA / WALLET VISIBILITY GATING ──────────────────────────
 function applyKhataVisibility() {
   const show = _khataEnabled;
-  // Bottom nav wallet button
   const bnWallet = doc('bn-wallet');
   if (bnWallet) bnWallet.style.display = show ? '' : 'none';
-  // Header wallet button — only show if also subscriber
   if (!show) doc('wallet-hdr-btn').classList.add('hide');
-  // Account panel wallet row
   const apWalletRow = doc('ap-wallet-row');
   if (apWalletRow) apWalletRow.style.display = show ? '' : 'none';
-  // Account page wallet wrap
   const acctWalletWrap = doc('acct-wallet-wrap');
   if (acctWalletWrap && !show) acctWalletWrap.classList.add('hide');
 }
 
-function startPolling() {
-  stopPolling();
-  _pollTimer = setInterval(() => {
-    if (document.hidden || !_session) return;
-    const cur = stack[stack.length - 1];
-    // Silently refresh wallet balance for subscribers (only if Khata ON)
-    if (_khataEnabled && getSub()) {
-      api('getSubscriberBalance', { phone: _session.phone })
-        .then(r => { updateWalletUI(Number(r.balance) || 0); })
-        .catch(() => {});
-    }
-    // Silently refresh orders if on orders page
-    if (cur === 'pg-orders') {
-      api('getUserOrders', { userId: _session.userId })
-        .then(orders => renderOrders(orders))
-        .catch(() => {});
-    }
-    // Silently refresh khata if on wallet page (only if Khata ON)
-    if (_khataEnabled && cur === 'pg-khata' && getSub()) {
-      api('getKhata', { phone: _session.phone })
-        .then(data => {
-          _userKhataEntries = data.entries || [];
-          _userKhataFiltered = [..._userKhataEntries];
-          const bal = Number(data.balance) || 0;
-          updateWalletUI(bal);
-          renderUserKhataList(_userKhataFiltered);
-        })
-        .catch(() => {});
-    }
-  }, 30000); // 30 seconds
-}
-
-function stopPolling() {
-  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
-}
+// No auto-polling — data fetched only on manual refresh or new order
+function startPolling() { /* no-op: polling removed for CPU efficiency */ }
+function stopPolling()  { /* no-op: polling removed for CPU efficiency */ }
 
 // ══════════════════════════════════════════════
 // STARTUP
